@@ -476,6 +476,8 @@ class KrgBased(SurrogateModel):
             )
         if is_acting is not None:
             self.is_acting_points[name] = is_acting
+        else:
+            self.is_acting_points.pop(name, None)
 
     def _correct_distances_cat_decreed(
         self,
