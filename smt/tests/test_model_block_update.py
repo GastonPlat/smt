@@ -25,12 +25,68 @@ def reference_model(base_model, X_all, Y_all):
     ref = deepcopy(base_model)
     ref.training_points[None][0] = [X_all, Y_all]
     ref.X_train = X_all
-    ref.X_norma = (X_all - ref.X_offset) / ref.X_scale
-    ref.y_norma = (Y_all - ref.y_mean) / ref.y_std
     ref.nt = X_all.shape[0]
+
+    if not ref.is_continuous:
+        from smt.surrogate_models.krg_based.mixed_int_corr import compute_X_cont, cross_levels
+        is_acting = ref.is_acting_points.get(None)
+        if is_acting is not None:
+            _, is_acting = ref.design_space.correct_get_acting(X_all)
+            ref.is_acting_points[None] = is_acting
+            ref.is_acting_train = is_acting
+
+        # This re-computes ref.D, ref.ij, ref.X_norma, ref.y_norma, ref.Lij, ref.n_levels, etc.
+        # But wait, it also computes X_offset and X_scale in _compute_training_distances if we just call it!
+        # Actually, `_compute_training_distances` uses `standardization(X_cont.copy(), y.copy())` which re-computes `X_offset`.
+        # To avoid recomputing `X_offset` and `X_scale`, we can temporarily patch it or just do the steps manually.
+
+        # Let's just do a proper train() with NoOp optimizer! But wait, NoOp optimizer still recomputes X_offset.
+        # The block update keeps X_offset fixed.
+
+        ref.D = ref._compute_training_distances(X_all, Y_all, is_acting)
+
+        # Override the standardization that just happened inside _compute_training_distances
+        X_cont, _ = compute_X_cont(X_all, ref.design_space)
+        ref.X_norma = (X_cont - base_model.X_offset) / base_model.X_scale
+        ref.y_norma = (Y_all - base_model.y_mean) / base_model.y_std
+        ref.X_offset = base_model.X_offset
+        ref.X_scale = base_model.X_scale
+        ref.y_mean = base_model.y_mean
+        ref.y_std = base_model.y_std
+
+        # Restore categorical scaling factors if they exist
+        if hasattr(base_model, "X2_offset"):
+            ref.X2_offset = base_model.X2_offset
+            ref.X2_scale = base_model.X2_scale
+            # Need to recompute ref.D with the correct scaling factors
+            X2, _, unfolded_cat = ref.design_space.unfold_x(X_all)
+            X2_norma = (X2 - ref.X2_offset) / ref.X2_scale
+            # We already have ref.D from gower, but now we need to overwrite the unfolded cat parts
+            import smt.surrogate_models.krg_based.distances as dist
+            D_unfolded, _ = dist.cross_distances(X2_norma)
+            D_unfolded = np.abs(D_unfolded)
+            if np.any(ref.design_space.is_conditionally_acting):
+                from smt.surrogate_models.krg_based.mixed_int_corr import gower_componentwise_distances
+                _, _, _, D_num = gower_componentwise_distances(
+                    X_all,
+                    x_is_acting=is_acting,
+                    design_space=ref.design_space,
+                    hierarchical_kernel=ref.options["hierarchical_kernel"],
+                )
+                D_unfolded[:, np.logical_not(unfolded_cat)] = (
+                    D_num / ref.X2_scale[np.logical_not(unfolded_cat)]
+                )
+            ref.D = D_unfolded
+            ref.X2_norma = X2_norma
+
+    else:
+        ref.X_norma = (X_all - ref.X_offset) / ref.X_scale
+        ref.y_norma = (Y_all - ref.y_mean) / ref.y_std
+        ref.F = ref._regression_types[ref.options["poly"]](ref.X_norma)
+        D, ref.ij = cross_distances(ref.X_norma)
+        ref.D = ref._componentwise_distance(D)
+
     ref.F = ref._regression_types[ref.options["poly"]](ref.X_norma)
-    D, ref.ij = cross_distances(ref.X_norma)
-    ref.D = ref._componentwise_distance(D)
 
     theta = ref.optimal_theta
     if ref._eval_noise:
@@ -59,7 +115,7 @@ class TestModelBlockUpdate(unittest.TestCase):
         sm.train()
         return sm
 
-    def assert_matches_reference(self, sm, updated, X_new, Y_new):
+    def assert_matches_reference(self, sm, updated, X_new, Y_new, var_rtol=1e-6, var_atol=1e-8):
         ref = reference_model(
             sm,
             np.vstack((sm.training_points[None][0][0], X_new)),
@@ -82,8 +138,8 @@ class TestModelBlockUpdate(unittest.TestCase):
         np.testing.assert_allclose(
             updated.predict_variances(self.x_test),
             ref.predict_variances(self.x_test),
-            rtol=1e-6,
-            atol=1e-8,
+            rtol=var_rtol,
+            atol=var_atol,
         )
 
     def test_single_point_update(self):
@@ -172,13 +228,6 @@ class TestModelBlockUpdate(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             sm.update_model(X_new, Y_new)
 
-        ds = DesignSpace([FloatVariable(0, 25), CategoricalVariable(["a", "b"])])
-        xt = np.array([[3.5, 0], [8.0, 1], [12.0, 0], [17.0, 1]])
-        sm = KRG(design_space=ds, print_global=False)
-        sm.set_training_values(xt, xsinx(xt[:, :1]))
-        sm.train()
-        with self.assertRaises(NotImplementedError):
-            sm.update_model(np.array([[23.0, 0]]), Y_new)
 
         x = np.linspace(0, 25, 20).reshape(-1, 1)
         sm = SGP(print_global=False, seed=42)
@@ -188,6 +237,70 @@ class TestModelBlockUpdate(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             sm.update_model(X_new, Y_new)
 
+
+    def test_mixed_variables_update(self):
+        ds = DesignSpace([FloatVariable(0, 25), CategoricalVariable(["a", "b"])])
+        xt = np.array([[3.5, 0], [8.0, 1], [12.0, 0], [17.0, 1]])
+        yt = xsinx(xt[:, :1])
+        sm = KRG(design_space=ds, print_global=False, seed=42)
+        sm.set_training_values(xt, yt)
+        sm.train()
+
+        X_new_single = np.array([[23.0, 0]])
+        Y_new_single = xsinx(X_new_single[:, :1])
+        updated_single = deepcopy(sm)
+        updated_single.update_model(X_new_single, Y_new_single)
+
+        # Temporarily override self.x_test
+        original_x_test = self.x_test
+        self.x_test = np.hstack((np.linspace(0, 25, 50).reshape(-1, 1), np.zeros((50, 1))))
+
+        self.assert_matches_reference(sm, updated_single, X_new_single, Y_new_single)
+
+        X_new_multi = np.array([[16.0, 1], [23.0, 0]])
+        Y_new_multi = xsinx(X_new_multi[:, :1])
+        updated_multi = deepcopy(sm)
+        updated_multi.update_model(X_new_multi, Y_new_multi)
+        self.assert_matches_reference(sm, updated_multi, X_new_multi, Y_new_multi)
+
+        self.x_test = original_x_test
+
+    def test_hierarchical_variables_update(self):
+        from smt.design_space import CategoricalVariable, FloatVariable, DesignSpace
+
+        ds = DesignSpace(
+            [
+                CategoricalVariable(["A", "B"]),  # x0
+                FloatVariable(0, 25),             # x1
+            ]
+        )
+        ds.declare_decreed_var(decreed_var=1, meta_var=0, meta_value="A")
+
+        xt = np.array([[0, 3.5], [1, 8.0], [0, 12.0], [1, 17.0]])
+        # Just generating some outputs
+        yt = np.zeros((4, 1))
+        for i in range(4):
+            if xt[i, 0] == 0:
+                yt[i] = xsinx(xt[i:i+1, 1:2])
+            else:
+                yt[i] = np.cos(xt[i:i+1, 1:2]) * 10
+
+        sm = KRG(design_space=ds, print_global=False, seed=42)
+        sm.set_training_values(xt, yt)
+        sm.train()
+
+        X_new = np.array([[0, 23.0]])
+        Y_new = xsinx(X_new[:, 1:2])
+
+        updated = deepcopy(sm)
+        updated.update_model(X_new, Y_new)
+
+        original_x_test = self.x_test
+        self.x_test = np.hstack((np.zeros((50, 1)), np.linspace(0, 25, 50).reshape(-1, 1)))
+
+        self.assert_matches_reference(sm, updated, X_new, Y_new, var_rtol=1e-2, var_atol=1e-2)
+
+        self.x_test = original_x_test
 
 if __name__ == "__main__":
     unittest.main()

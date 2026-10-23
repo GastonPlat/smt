@@ -11,6 +11,15 @@ from scipy.linalg import cholesky, qr, solve_triangular
 
 from smt.kernels import Kernel
 from smt.surrogate_models.krg_based import KrgBased
+
+from smt.surrogate_models.krg_based.distances import cross_distances
+from smt.surrogate_models.krg_based.kernel_types import MixIntKernelType
+from smt.surrogate_models.krg_based.mixed_int_corr import (
+    compute_X_cont,
+    cross_levels,
+    gower_componentwise_distances,
+)
+
 from smt.surrogate_models.krg_based.distances import (
     componentwise_distance,
     differences,
@@ -160,17 +169,6 @@ class KRG(KrgBased):
                 f"Block update is not supported for {type(self).__name__} models."
             )
 
-        is_continuous_design_space = self.design_space.is_all_cont
-        if not is_continuous_design_space:
-            raise NotImplementedError(
-                "Block update is only supported for continuous design variables."
-            )
-
-        is_hierarchical = self.design_space.is_conditionally_acting.any()
-        if is_hierarchical:
-            raise NotImplementedError(
-                "Block update is only supported for non-hierarchical design spaces."
-            )
 
         if self.options["use_het_noise"]:
             raise NotImplementedError(
@@ -182,8 +180,121 @@ class KRG(KrgBased):
                 "Block update is not supported with reinterpolation (is_ri)."
             )
 
+
+    def _compute_mixed_distances_between(
+        self, X1, is_acting1, X2, is_acting2
+    ):
+        _, ij = cross_distances(X1, y=X2)
+        D, D_num = gower_componentwise_distances(
+            X1,
+            x_is_acting=is_acting1,
+            design_space=self.design_space,
+            hierarchical_kernel=self.options["hierarchical_kernel"],
+            y=np.copy(X2),
+            y_is_acting=is_acting2,
+        )
+        listcatdecreed = self.design_space.is_conditionally_acting[self.cat_features]
+        if np.any(listcatdecreed):
+            D = self._correct_distances_cat_decreed(
+                D,
+                is_acting1,
+                listcatdecreed,
+                ij,
+                is_acting_y=is_acting2,
+                mixint_type=MixIntKernelType.GOWER,
+            )
+
+        if self.options["categorical_kernel"] == MixIntKernelType.CONT_RELAX:
+            X1_unfolded, _, unfolded_cat = self.design_space.unfold_x(X1)
+            X2_unfolded, _, _ = self.design_space.unfold_x(X2)
+            X1_norma = (X1_unfolded - self.X2_offset) / self.X2_scale
+            X2_norma = (X2_unfolded - self.X2_offset) / self.X2_scale
+            D = np.abs(differences(X1_norma, Y=X2_norma.copy()))
+
+            if (
+                "n_comp" not in self.options._dict.keys()
+                and "cat_kernel_comp" not in self.options._dict.keys()
+            ):
+                if np.any(listcatdecreed):
+                    D = self._correct_distances_cat_decreed(
+                        D,
+                        is_acting1,
+                        listcatdecreed,
+                        ij,
+                        is_acting_y=is_acting2,
+                        mixint_type=MixIntKernelType.GOWER,
+                    )
+            if np.any(self.design_space.is_conditionally_acting):
+                D[:, np.logical_not(unfolded_cat)] = (
+                    D_num / self.X2_scale[np.logical_not(unfolded_cat)]
+                )
+
+        if self.options["categorical_kernel"] == MixIntKernelType.DIST_ENCODING:
+            self._mix_int_corr.replace_with_de_distances(
+                D,
+                X2,
+                ij,
+                self.options["categorical_kernel_beta"],
+                x_pred=X1,
+            )
+
+        Lij, _ = cross_levels(
+            X=X1, ij=ij, design_space=self.design_space, y=X2
+        )
+        return D, Lij
+
+    def _compute_R12_R22_mixed(self, X_new: np.ndarray, is_acting_new: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        n_new = X_new.shape[0]
+
+        dx12, Lij12 = self._compute_mixed_distances_between(
+            X_new, is_acting_new, self.X_train, self.is_acting_train
+        )
+        R12 = self._matrix_data_corr(
+            corr=self.options["corr"],
+            design_space=self.design_space,
+            power=self._pow_exp_power,
+            theta=self.optimal_theta,
+            theta_bounds=self.options["theta_bounds"],
+            dx=dx12,
+            Lij=Lij12,
+            n_levels=self.n_levels,
+            cat_features=self.cat_features,
+            cat_kernel=self.options["categorical_kernel"],
+            x=X_new,
+        ).reshape(n_new, self.nt).T
+
+        dx22, Lij22 = self._compute_mixed_distances_between(
+            X_new, is_acting_new, X_new, is_acting_new
+        )
+        R22 = self._matrix_data_corr(
+            corr=self.options["corr"],
+            design_space=self.design_space,
+            power=self._pow_exp_power,
+            theta=self.optimal_theta,
+            theta_bounds=self.options["theta_bounds"],
+            dx=dx22,
+            Lij=Lij22,
+            n_levels=self.n_levels,
+            cat_features=self.cat_features,
+            cat_kernel=self.options["categorical_kernel"],
+            x=X_new,
+        ).reshape(n_new, n_new)
+        return R12, R22
+
+    def _compute_R12_R22_cont(self, X_new_norma: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        n_new = X_new_norma.shape[0]
+
+        dx12 = differences(self.X_norma, Y=X_new_norma)
+        d12 = self._componentwise_distance(dx12)
+        R12 = self.corr(d12).reshape(self.nt, n_new)
+
+        dx22 = differences(X_new_norma, Y=X_new_norma)
+        d22 = self._componentwise_distance(dx22)
+        R22 = self.corr(d22).reshape(n_new, n_new)
+        return R12, R22
+
     def _extend_cholesky(
-        self, X_new_norma: np.ndarray
+        self, X_new: np.ndarray, X_new_norma: np.ndarray, is_acting_new: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Extend the Cholesky factor of the training correlation matrix with
@@ -191,8 +302,12 @@ class KRG(KrgBased):
 
         Parameters
         ----------
+        X_new : np.ndarray
+            New input points (original).
         X_new_norma : np.ndarray
             New input points, normalized with the model scaling factors.
+        is_acting_new : np.ndarray
+            Is acting array for the new points.
 
         Returns
         -------
@@ -203,15 +318,10 @@ class KRG(KrgBased):
         L22 : np.ndarray
             New diagonal block of the Cholesky matrix.
         """
-        n_new = X_new_norma.shape[0]
-
-        dx12 = differences(self.X_norma, Y=X_new_norma)
-        d12 = self._componentwise_distance(dx12)
-        R12 = self.corr(d12).reshape(self.nt, n_new)
-
-        dx22 = differences(X_new_norma, Y=X_new_norma)
-        d22 = self._componentwise_distance(dx22)
-        R22 = self.corr(d22).reshape(n_new, n_new)
+        if not self.is_continuous:
+            R12, R22 = self._compute_R12_R22_mixed(X_new, is_acting_new)
+        else:
+            R12, R22 = self._compute_R12_R22_cont(X_new_norma)
 
         L_old = self.optimal_par["C"]
 
@@ -256,11 +366,22 @@ class KRG(KrgBased):
                 f"with {self.ny}."
             )
 
-        X_new_norma = (X_new - self.X_offset) / self.X_scale
+        is_acting = self.is_acting_points.get(None)
+        if is_acting is not None:
+            _, is_acting_new = self.design_space.correct_get_acting(X_new)
+        else:
+            is_acting_new = None
+
+        if not self.is_continuous:
+            X_cont_new, _ = compute_X_cont(X_new, self.design_space)
+        else:
+            X_cont_new = np.copy(X_new)
+
+        X_new_norma = (X_cont_new - self.X_offset) / self.X_scale
         Y_new_norma = (Y_new - self.y_mean) / self.y_std
 
         L_old = self.optimal_par["C"]
-        L_new, L21, L22 = self._extend_cholesky(X_new_norma)
+        L_new, L21, L22 = self._extend_cholesky(X_new, X_new_norma, is_acting_new)
 
         # Whitened (L^-1 applied) regression matrix and outputs of the old points.
         # Ft_old comes from training; Yt_old costs one O(nt^2) triangular solve.
@@ -273,12 +394,26 @@ class KRG(KrgBased):
         Y_train_appended = np.vstack((self.training_points[None][0][1], Y_new))
         self.training_points[None][0][1] = Y_train_appended
 
-        # Keep the acting status in sync when it was provided (all acting here)
-        is_acting = self.is_acting_points.get(None)
         if is_acting is not None:
-            is_acting_new = np.ones(X_new.shape, dtype=bool)
             self.is_acting_points[None] = np.vstack((is_acting, is_acting_new))
             self.is_acting_train = self.is_acting_points[None]
+
+        if not self.is_continuous:
+            # Update ij for the new training points
+            # To do this safely and efficiently without recomputing all pairs:
+            # Actually, `self.ij` should be updated to include pairs with new points
+            # But `cross_distances` computes both `D` and `ij` easily.
+            # To keep things perfectly aligned, let's just use `cross_distances(self.X_train)`.
+            _, self.ij = cross_distances(self.X_train)
+
+            # Recompute global Lij and n_levels
+            self.Lij, self.n_levels = cross_levels(
+                X=self.X_train, ij=self.ij, design_space=self.design_space
+            )
+            if hasattr(self, "X2_norma"):
+                X_new_unfolded, _, _ = self.design_space.unfold_x(X_new)
+                X_new_unfolded_norma = (X_new_unfolded - self.X2_offset) / self.X2_scale
+                self.X2_norma = np.vstack((self.X2_norma, X_new_unfolded_norma))
 
         self.X_norma = np.vstack((self.X_norma, X_new_norma))
         self.y_norma = np.vstack((self.y_norma, Y_new_norma))
