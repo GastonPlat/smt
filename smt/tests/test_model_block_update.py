@@ -16,6 +16,65 @@ def xsinx(x: np.ndarray) -> np.ndarray:
     return x * np.sin(x)
 
 
+def _setup_mixed_reference(ref, base_model, X_all, Y_all):
+    from smt.surrogate_models.krg_based.mixed_int_corr import compute_X_cont
+    is_acting = ref.is_acting_points.get(None)
+    if is_acting is not None:
+        _, is_acting = ref.design_space.correct_get_acting(X_all)
+        ref.is_acting_points[None] = is_acting
+        ref.is_acting_train = is_acting
+
+    ref.D = ref._compute_training_distances(X_all, Y_all, is_acting)
+
+    X_cont, _ = compute_X_cont(X_all, ref.design_space)
+    ref.X_norma = (X_cont - base_model.X_offset) / base_model.X_scale
+    ref.y_norma = (Y_all - base_model.y_mean) / base_model.y_std
+    ref.X_offset = base_model.X_offset
+    ref.X_scale = base_model.X_scale
+    ref.y_mean = base_model.y_mean
+    ref.y_std = base_model.y_std
+
+    if hasattr(base_model, "X2_offset"):
+        _restore_categorical_scaling(ref, base_model, X_all, is_acting)
+
+def _restore_categorical_scaling(ref, base_model, X_all, is_acting):
+    ref.X2_offset = base_model.X2_offset
+    ref.X2_scale = base_model.X2_scale
+    X2, _, unfolded_cat = ref.design_space.unfold_x(X_all)
+    X2_norma = (X2 - ref.X2_offset) / ref.X2_scale
+
+    import smt.surrogate_models.krg_based.distances as dist
+    from smt.surrogate_models.krg_based.mixed_int_corr import gower_componentwise_distances
+
+    D_unfolded, _ = dist.cross_distances(X2_norma)
+    D_unfolded = np.abs(D_unfolded)
+    if np.any(ref.design_space.is_conditionally_acting):
+        _, _, _, D_num = gower_componentwise_distances(
+            X_all,
+            x_is_acting=is_acting,
+            design_space=ref.design_space,
+            hierarchical_kernel=ref.options["hierarchical_kernel"],
+        )
+        D_unfolded[:, np.logical_not(unfolded_cat)] = (
+            D_num / ref.X2_scale[np.logical_not(unfolded_cat)]
+        )
+    ref.D = D_unfolded
+    ref.X2_norma = X2_norma
+
+def _setup_continuous_reference(ref, X_all, Y_all):
+    ref.X_norma = (X_all - ref.X_offset) / ref.X_scale
+    ref.y_norma = (Y_all - ref.y_mean) / ref.y_std
+    ref.F = ref._regression_types[ref.options["poly"]](ref.X_norma)
+    D, ref.ij = cross_distances(ref.X_norma)
+    ref.D = ref._componentwise_distance(D)
+
+def _compute_reference_optimal_par(ref):
+    theta = ref.optimal_theta
+    if ref._eval_noise:
+        theta = np.append(theta, ref.optimal_noise)
+    _, par = ref._reduced_likelihood_function(theta=theta)
+    return par
+
 def reference_model(base_model, X_all, Y_all):
     """
     Return a copy of base_model holding the GLS parameters recomputed from
@@ -28,71 +87,13 @@ def reference_model(base_model, X_all, Y_all):
     ref.nt = X_all.shape[0]
 
     if not ref.is_continuous:
-        from smt.surrogate_models.krg_based.mixed_int_corr import compute_X_cont, cross_levels
-        is_acting = ref.is_acting_points.get(None)
-        if is_acting is not None:
-            _, is_acting = ref.design_space.correct_get_acting(X_all)
-            ref.is_acting_points[None] = is_acting
-            ref.is_acting_train = is_acting
-
-        # This re-computes ref.D, ref.ij, ref.X_norma, ref.y_norma, ref.Lij, ref.n_levels, etc.
-        # But wait, it also computes X_offset and X_scale in _compute_training_distances if we just call it!
-        # Actually, `_compute_training_distances` uses `standardization(X_cont.copy(), y.copy())` which re-computes `X_offset`.
-        # To avoid recomputing `X_offset` and `X_scale`, we can temporarily patch it or just do the steps manually.
-
-        # Let's just do a proper train() with NoOp optimizer! But wait, NoOp optimizer still recomputes X_offset.
-        # The block update keeps X_offset fixed.
-
-        ref.D = ref._compute_training_distances(X_all, Y_all, is_acting)
-
-        # Override the standardization that just happened inside _compute_training_distances
-        X_cont, _ = compute_X_cont(X_all, ref.design_space)
-        ref.X_norma = (X_cont - base_model.X_offset) / base_model.X_scale
-        ref.y_norma = (Y_all - base_model.y_mean) / base_model.y_std
-        ref.X_offset = base_model.X_offset
-        ref.X_scale = base_model.X_scale
-        ref.y_mean = base_model.y_mean
-        ref.y_std = base_model.y_std
-
-        # Restore categorical scaling factors if they exist
-        if hasattr(base_model, "X2_offset"):
-            ref.X2_offset = base_model.X2_offset
-            ref.X2_scale = base_model.X2_scale
-            # Need to recompute ref.D with the correct scaling factors
-            X2, _, unfolded_cat = ref.design_space.unfold_x(X_all)
-            X2_norma = (X2 - ref.X2_offset) / ref.X2_scale
-            # We already have ref.D from gower, but now we need to overwrite the unfolded cat parts
-            import smt.surrogate_models.krg_based.distances as dist
-            D_unfolded, _ = dist.cross_distances(X2_norma)
-            D_unfolded = np.abs(D_unfolded)
-            if np.any(ref.design_space.is_conditionally_acting):
-                from smt.surrogate_models.krg_based.mixed_int_corr import gower_componentwise_distances
-                _, _, _, D_num = gower_componentwise_distances(
-                    X_all,
-                    x_is_acting=is_acting,
-                    design_space=ref.design_space,
-                    hierarchical_kernel=ref.options["hierarchical_kernel"],
-                )
-                D_unfolded[:, np.logical_not(unfolded_cat)] = (
-                    D_num / ref.X2_scale[np.logical_not(unfolded_cat)]
-                )
-            ref.D = D_unfolded
-            ref.X2_norma = X2_norma
-
+        _setup_mixed_reference(ref, base_model, X_all, Y_all)
     else:
-        ref.X_norma = (X_all - ref.X_offset) / ref.X_scale
-        ref.y_norma = (Y_all - ref.y_mean) / ref.y_std
-        ref.F = ref._regression_types[ref.options["poly"]](ref.X_norma)
-        D, ref.ij = cross_distances(ref.X_norma)
-        ref.D = ref._componentwise_distance(D)
+        _setup_continuous_reference(ref, X_all, Y_all)
 
     ref.F = ref._regression_types[ref.options["poly"]](ref.X_norma)
+    ref.optimal_par = _compute_reference_optimal_par(ref)
 
-    theta = ref.optimal_theta
-    if ref._eval_noise:
-        theta = np.append(theta, ref.optimal_noise)
-    _, par = ref._reduced_likelihood_function(theta=theta)
-    ref.optimal_par = par
     return ref
 
 
@@ -270,7 +271,6 @@ class TestModelBlockUpdate(unittest.TestCase):
         self._assert_mixed_matches(sm, updated_multi, X_new_multi, Y_new_multi)
 
     def test_hierarchical_variables_update(self):
-        from smt.design_space import CategoricalVariable, FloatVariable, DesignSpace
 
         ds = DesignSpace(
             [
