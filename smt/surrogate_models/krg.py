@@ -181,62 +181,59 @@ class KRG(KrgBased):
             )
 
 
+    def _apply_conditional_acting_bounds(self, D: np.ndarray, D_num: np.ndarray, X1: np.ndarray, is_acting1: np.ndarray, X2: np.ndarray, is_acting2: np.ndarray, ij: np.ndarray) -> np.ndarray:
+        listcatdecreed = self.design_space.is_conditionally_acting[self.cat_features]
+        if np.any(listcatdecreed):
+            D = self._correct_distances_cat_decreed(
+                D, is_acting1, listcatdecreed, ij,
+                is_acting_y=is_acting2, mixint_type=MixIntKernelType.GOWER
+            )
+        return D
+
+    def _apply_continuous_relaxation(self, D: np.ndarray, D_num: np.ndarray, X1: np.ndarray, is_acting1: np.ndarray, X2: np.ndarray, is_acting2: np.ndarray, ij: np.ndarray) -> np.ndarray:
+        X1_unfolded, _, unfolded_cat = self.design_space.unfold_x(X1)
+        X2_unfolded, _, _ = self.design_space.unfold_x(X2)
+        X1_norma = (X1_unfolded - self.X2_offset) / self.X2_scale
+        X2_norma = (X2_unfolded - self.X2_offset) / self.X2_scale
+        D = np.abs(differences(X1_norma, Y=X2_norma.copy()))
+
+        if (
+            "n_comp" not in self.options._dict.keys()
+            and "cat_kernel_comp" not in self.options._dict.keys()
+        ):
+            D = self._apply_conditional_acting_bounds(D, D_num, X1, is_acting1, X2, is_acting2, ij)
+        if np.any(self.design_space.is_conditionally_acting):
+            D[:, np.logical_not(unfolded_cat)] = (
+                D_num / self.X2_scale[np.logical_not(unfolded_cat)]
+            )
+        return D
+
+    def _apply_distributional_encoding(self, D: np.ndarray, D_num: np.ndarray, X1: np.ndarray, is_acting1: np.ndarray, X2: np.ndarray, is_acting2: np.ndarray, ij: np.ndarray) -> np.ndarray:
+        self._mix_int_corr.replace_with_de_distances(
+            D, X2, ij, self.options["categorical_kernel_beta"], x_pred=X1
+        )
+        return D
+
     def _compute_mixed_distances_between(
         self, X1, is_acting1, X2, is_acting2
     ):
         _, ij = cross_distances(X1, y=X2)
         D, D_num = gower_componentwise_distances(
-            X1,
-            x_is_acting=is_acting1,
-            design_space=self.design_space,
+            X1, x_is_acting=is_acting1, design_space=self.design_space,
             hierarchical_kernel=self.options["hierarchical_kernel"],
-            y=np.copy(X2),
-            y_is_acting=is_acting2,
+            y=np.copy(X2), y_is_acting=is_acting2,
         )
-        listcatdecreed = self.design_space.is_conditionally_acting[self.cat_features]
-        if np.any(listcatdecreed):
-            D = self._correct_distances_cat_decreed(
-                D,
-                is_acting1,
-                listcatdecreed,
-                ij,
-                is_acting_y=is_acting2,
-                mixint_type=MixIntKernelType.GOWER,
-            )
 
-        if self.options["categorical_kernel"] == MixIntKernelType.CONT_RELAX:
-            X1_unfolded, _, unfolded_cat = self.design_space.unfold_x(X1)
-            X2_unfolded, _, _ = self.design_space.unfold_x(X2)
-            X1_norma = (X1_unfolded - self.X2_offset) / self.X2_scale
-            X2_norma = (X2_unfolded - self.X2_offset) / self.X2_scale
-            D = np.abs(differences(X1_norma, Y=X2_norma.copy()))
+        D = self._apply_conditional_acting_bounds(D, D_num, X1, is_acting1, X2, is_acting2, ij)
 
-            if (
-                "n_comp" not in self.options._dict.keys()
-                and "cat_kernel_comp" not in self.options._dict.keys()
-            ):
-                if np.any(listcatdecreed):
-                    D = self._correct_distances_cat_decreed(
-                        D,
-                        is_acting1,
-                        listcatdecreed,
-                        ij,
-                        is_acting_y=is_acting2,
-                        mixint_type=MixIntKernelType.GOWER,
-                    )
-            if np.any(self.design_space.is_conditionally_acting):
-                D[:, np.logical_not(unfolded_cat)] = (
-                    D_num / self.X2_scale[np.logical_not(unfolded_cat)]
-                )
+        kernel_handlers = {
+            MixIntKernelType.CONT_RELAX: self._apply_continuous_relaxation,
+            MixIntKernelType.DIST_ENCODING: self._apply_distributional_encoding,
+        }
 
-        if self.options["categorical_kernel"] == MixIntKernelType.DIST_ENCODING:
-            self._mix_int_corr.replace_with_de_distances(
-                D,
-                X2,
-                ij,
-                self.options["categorical_kernel_beta"],
-                x_pred=X1,
-            )
+        handler = kernel_handlers.get(self.options["categorical_kernel"])
+        if handler:
+            D = handler(D, D_num, X1, is_acting1, X2, is_acting2, ij)
 
         Lij, _ = cross_levels(
             X=X1, ij=ij, design_space=self.design_space, y=X2
@@ -364,7 +361,7 @@ class KRG(KrgBased):
                 X_new_unfolded_norma = (X_new_unfolded - self.X2_offset) / self.X2_scale
                 self.X2_norma = np.vstack((self.X2_norma, X_new_unfolded_norma))
 
-    def _update_gls_parameters(self, Ft: np.ndarray, Yt: np.ndarray, L_new: np.ndarray) -> None:
+    def _update_predictive_parameters(self, Ft: np.ndarray, Yt: np.ndarray, L_new: np.ndarray) -> None:
         Q, G = qr(Ft, mode="economic")
         beta = solve_triangular(G, Q.T @ Yt, check_finite=False)
         rho = Yt - Ft @ beta
@@ -458,4 +455,4 @@ class KRG(KrgBased):
         Ft = np.vstack((Ft_old, Ft_new))
         Yt = np.vstack((Yt_old, Yt_new))
 
-        self._update_gls_parameters(Ft, Yt, L_new)
+        self._update_predictive_parameters(Ft, Yt, L_new)
