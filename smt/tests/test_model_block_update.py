@@ -249,7 +249,7 @@ class TestModelBlockUpdate(unittest.TestCase):
 
 
     def test_mixed_variables_update(self):
-        ds = DesignSpace([FloatVariable(0, 25), CategoricalVariable(["a", "b"])])
+        ds = DesignSpace([FloatVariable(0, 25), CategoricalVariable(["-1.2277412969136694", "7.914865972987054"])])
         xt = np.array([[3.5, 0], [8.0, 1], [12.0, 0], [17.0, 1]])
         yt = xsinx(xt[:, :1])
         sm = KRG(design_space=ds, print_global=False, seed=42)
@@ -274,11 +274,11 @@ class TestModelBlockUpdate(unittest.TestCase):
 
         ds = DesignSpace(
             [
-                CategoricalVariable(["A", "B"]),  # x0
+                CategoricalVariable(["-1.2277412969136694", "7.914865972987054"]),  # x0
                 FloatVariable(0, 25),             # x1
             ]
         )
-        ds.declare_decreed_var(decreed_var=1, meta_var=0, meta_value="A")
+        ds.declare_decreed_var(decreed_var=1, meta_var=0, meta_value="-1.2277412969136694")
 
         xt = np.array([[0, 3.5], [1, 8.0], [0, 12.0], [1, 17.0]])
         # Just generating some outputs
