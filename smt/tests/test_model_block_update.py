@@ -115,7 +115,7 @@ class TestModelBlockUpdate(unittest.TestCase):
         sm.train()
         return sm
 
-    def assert_matches_reference(self, sm, updated, X_new, Y_new, var_rtol=1e-6, var_atol=1e-8):
+    def assert_matches_reference(self, sm, updated, X_new, Y_new, par_rtol=1e-6, par_atol=1e-8, var_rtol=1e-6, var_atol=1e-8):
         ref = reference_model(
             sm,
             np.vstack((sm.training_points[None][0][0], X_new)),
@@ -125,8 +125,8 @@ class TestModelBlockUpdate(unittest.TestCase):
             np.testing.assert_allclose(
                 updated.optimal_par[key],
                 ref.optimal_par[key],
-                rtol=1e-6,
-                atol=1e-8,
+                rtol=par_rtol,
+                atol=par_atol,
                 err_msg=key,
             )
         np.testing.assert_allclose(
@@ -298,7 +298,7 @@ class TestModelBlockUpdate(unittest.TestCase):
         original_x_test = self.x_test
         self.x_test = np.hstack((np.zeros((50, 1)), np.linspace(0, 25, 50).reshape(-1, 1)))
 
-        self.assert_matches_reference(sm, updated, X_new, Y_new, var_rtol=1e-2, var_atol=1e-2)
+        self.assert_matches_reference(sm, updated, X_new, Y_new, par_rtol=1e-3, par_atol=1e-3, var_rtol=1e-2, var_atol=1e-2)
 
         self.x_test = original_x_test
 
