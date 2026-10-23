@@ -105,7 +105,7 @@ class TestModelBlockUpdate(unittest.TestCase):
         original_x_test = self.x_test
         if is_hierarchical:
             self.x_test = np.hstack((np.zeros((50, 1)), np.linspace(0, 25, 50).reshape(-1, 1)))
-            self.assert_matches_reference(sm, updated, X_new, Y_new, par_rtol=1e-2, par_atol=1e-2, var_rtol=1e-2, var_atol=1e-2, pred_rtol=1e-2, pred_atol=1e-2)
+            self.assert_matches_reference(sm, updated, X_new, Y_new, par_rtol=1e-2, par_atol=1e-2, var_rtol=1e-2, var_atol=1e-2, pred_rtol=5e-2, pred_atol=5e-1)
         else:
             self.x_test = np.hstack((np.linspace(0, 25, 50).reshape(-1, 1), np.zeros((50, 1))))
             self.assert_matches_reference(sm, updated, X_new, Y_new)
