@@ -15,7 +15,6 @@ from smt.design_space import (
     FloatVariable,
 )
 from smt.surrogate_models import KRG, SGP
-from smt.surrogate_models.krg_based.distances import cross_distances
 
 
 def xsinx(x: np.ndarray) -> np.ndarray:
@@ -68,7 +67,7 @@ def _setup_continuous_reference(ref, X_all, Y_all):
     ref.X_norma = (X_all - ref.X_offset) / ref.X_scale
     ref.y_norma = (Y_all - ref.y_mean) / ref.y_std
     ref.F = ref._regression_types[ref.options["poly"]](ref.X_norma)
-    D, ref.ij = cross_distances(ref.X_norma)
+    D, ref.ij = dist.cross_distances(ref.X_norma)
     ref.D = ref._componentwise_distance(D)
 
 def _compute_reference_optimal_par(ref):

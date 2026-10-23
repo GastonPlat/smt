@@ -73,8 +73,9 @@ class KRG(KrgBased):
         Contrary to ``train()``, the scaling factors are not recomputed, so
         results differ slightly from a re-training with ``hyper_opt="NoOp"``.
 
-        Only continuous, non-hierarchical design spaces with homoscedastic
-        noise and ``is_ri=False`` are supported.
+        Supported for continuous and mixed-integer hierarchical design spaces.
+        However, heteroscedastic noise, reinterpolation (is_ri), and non-distance
+        based categorical kernels (e.g., PLS-based hypersphere) are not supported.
 
         Parameters
         ----------
@@ -159,9 +160,8 @@ class KRG(KrgBased):
         Raises
         ------
         NotImplementedError
-            If the model is a subclass of KRG, if the design space has
-            non-continuous or conditionally acting variables, or if
-            heteroscedastic noise or reinterpolation is used.
+            If the model is a subclass of KRG, if heteroscedastic noise or
+            reinterpolation is used, or if the categorical kernel is not distance-based.
         """
         # Subclasses (e.g. SGP) store a different model state in optimal_par
         if type(self) is not KRG:
@@ -179,6 +179,18 @@ class KRG(KrgBased):
             raise NotImplementedError(
                 "Block update is not supported with reinterpolation (is_ri)."
             )
+
+        try:
+            cat_kernel = self.options["categorical_kernel"]
+            if cat_kernel in [
+                MixIntKernelType.EXP_HOMO_HSPHERE,
+                MixIntKernelType.HOMO_HSPHERE,
+            ]:
+                raise NotImplementedError(
+                    "Block update is not supported for non distance-based categorical kernels."
+                )
+        except KeyError:
+            pass
 
 
     def _correct_categorical_acting_distances(self, D: np.ndarray, is_acting1: np.ndarray, is_acting2: np.ndarray, ij: np.ndarray, mixint_type) -> np.ndarray:
@@ -243,9 +255,7 @@ class KRG(KrgBased):
     def _compute_R12_R22_mixed(self, X_new: np.ndarray, is_acting_new: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         n_new = X_new.shape[0]
 
-        dx12, Lij12 = self._compute_mixed_distances_between(
-            X_new, is_acting_new, self.X_train, self.is_acting_train
-        )
+        _, _, _, _, Lij12, dx12 = self._predict_init(X_new, is_acting_new)
         R12 = self._matrix_data_corr(
             corr=self.options["corr"],
             design_space=self.design_space,
@@ -278,12 +288,12 @@ class KRG(KrgBased):
         ).reshape(n_new, n_new)
         return R12, R22
 
-    def _compute_R12_R22_cont(self, X_new_norma: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        n_new = X_new_norma.shape[0]
+    def _compute_R12_R22_cont(self, X_new: np.ndarray, X_new_norma: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        n_new = X_new.shape[0]
 
-        dx12 = differences(self.X_norma, Y=X_new_norma)
+        _, _, _, _, _, dx12 = self._predict_init(X_new, None)
         d12 = self._componentwise_distance(dx12)
-        R12 = self.corr(d12).reshape(self.nt, n_new)
+        R12 = self.corr(d12).reshape(n_new, self.nt).T
 
         dx22 = differences(X_new_norma, Y=X_new_norma)
         d22 = self._componentwise_distance(dx22)
@@ -318,7 +328,7 @@ class KRG(KrgBased):
         if not self.is_continuous:
             R12, R22 = self._compute_R12_R22_mixed(X_new, is_acting_new)
         else:
-            R12, R22 = self._compute_R12_R22_cont(X_new_norma)
+            R12, R22 = self._compute_R12_R22_cont(X_new, X_new_norma)
 
         L_old = self.optimal_par["C"]
 
@@ -456,5 +466,3 @@ class KRG(KrgBased):
         Yt = np.vstack((Yt_old, Yt_new))
 
         self._update_predictive_parameters(Ft, Yt, L_new)
-
-# trigger update
