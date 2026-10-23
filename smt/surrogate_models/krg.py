@@ -331,6 +331,72 @@ class KRG(KrgBased):
 
         return self._update_cholesky_block(L_old, R12, R22, nugget=nugget + noise)
 
+    def _get_is_acting(self, X_new: np.ndarray) -> np.ndarray:
+        if self.is_acting_points.get(None) is not None:
+            _, is_acting_new = self.design_space.correct_get_acting(X_new)
+            return is_acting_new
+        return None
+
+    def _sync_is_acting(self, is_acting_new: np.ndarray) -> None:
+        is_acting = self.is_acting_points.get(None)
+        if is_acting is not None:
+            self.is_acting_points[None] = np.vstack((is_acting, is_acting_new))
+            self.is_acting_train = self.is_acting_points[None]
+
+    def _get_normalized_inputs(self, X_new: np.ndarray) -> np.ndarray:
+        if not self.is_continuous:
+            X_cont_new, _ = compute_X_cont(X_new, self.design_space)
+        else:
+            X_cont_new = np.copy(X_new)
+        return (X_cont_new - self.X_offset) / self.X_scale
+
+    def _get_normalized_outputs(self, Y_new: np.ndarray) -> np.ndarray:
+        return (Y_new - self.y_mean) / self.y_std
+
+    def _recompute_categorical_metadata(self, X_new: np.ndarray) -> None:
+        if not self.is_continuous:
+            _, self.ij = cross_distances(self.X_train)
+            self.Lij, self.n_levels = cross_levels(
+                X=self.X_train, ij=self.ij, design_space=self.design_space
+            )
+            if hasattr(self, "X2_norma"):
+                X_new_unfolded, _, _ = self.design_space.unfold_x(X_new)
+                X_new_unfolded_norma = (X_new_unfolded - self.X2_offset) / self.X2_scale
+                self.X2_norma = np.vstack((self.X2_norma, X_new_unfolded_norma))
+
+    def _update_gls_parameters(self, Ft: np.ndarray, Yt: np.ndarray, L_new: np.ndarray) -> None:
+        Q, G = qr(Ft, mode="economic")
+        beta = solve_triangular(G, Q.T @ Yt, check_finite=False)
+        rho = Yt - Ft @ beta
+        p, q = self._get_pq()
+        sigma2 = (rho**2.0).sum(axis=0) / (self.nt - p - q)
+
+        self.optimal_par["sigma2"] = sigma2 * self.y_std**2.0
+        self.optimal_par["beta"] = beta
+        self.optimal_par["gamma"] = solve_triangular(L_new.T, rho, check_finite=False)
+        self.optimal_par["C"] = L_new
+        self.optimal_par["Ft"] = Ft
+        self.optimal_par["G"] = G
+        self.optimal_par["Q"] = Q
+
+    def _check_update_dimensions(self, X_new: np.ndarray, Y_new: np.ndarray) -> None:
+        if not hasattr(self, "optimal_par"):
+            raise RuntimeError("update_model requires a trained model.")
+
+        self._check_model_compatibility()
+
+        check_nx(self, X_new)
+        if Y_new.shape[0] != X_new.shape[0]:
+            raise ValueError(
+                f"X and Y must have the same number of rows "
+                f"(got {X_new.shape[0]} and {Y_new.shape[0]})."
+            )
+        if Y_new.shape[1] != self.ny:
+            raise ValueError(
+                f"Y has {Y_new.shape[1]} outputs, but the model was trained "
+                f"with {self.ny}."
+            )
+
     def _update_smt_model(self, X_new: np.ndarray, Y_new: np.ndarray) -> None:
         """
         Perform the Cholesky block update and store the new state in the model
@@ -347,38 +413,14 @@ class KRG(KrgBased):
         Y_new : np.ndarray
             Output values at the new input points.
         """
-        if not hasattr(self, "optimal_par"):
-            raise RuntimeError("update_model requires a trained model.")
-
-        self._check_model_compatibility()
-
         X_new = ensure_2d_array(X_new, "X")
-        check_nx(self, X_new)
         Y_new = ensure_2d_array(Y_new, "Y")
-        if Y_new.shape[0] != X_new.shape[0]:
-            raise ValueError(
-                f"X and Y must have the same number of rows "
-                f"(got {X_new.shape[0]} and {Y_new.shape[0]})."
-            )
-        if Y_new.shape[1] != self.ny:
-            raise ValueError(
-                f"Y has {Y_new.shape[1]} outputs, but the model was trained "
-                f"with {self.ny}."
-            )
 
-        is_acting = self.is_acting_points.get(None)
-        if is_acting is not None:
-            _, is_acting_new = self.design_space.correct_get_acting(X_new)
-        else:
-            is_acting_new = None
+        self._check_update_dimensions(X_new, Y_new)
 
-        if not self.is_continuous:
-            X_cont_new, _ = compute_X_cont(X_new, self.design_space)
-        else:
-            X_cont_new = np.copy(X_new)
-
-        X_new_norma = (X_cont_new - self.X_offset) / self.X_scale
-        Y_new_norma = (Y_new - self.y_mean) / self.y_std
+        is_acting_new = self._get_is_acting(X_new)
+        X_new_norma = self._get_normalized_inputs(X_new)
+        Y_new_norma = self._get_normalized_outputs(Y_new)
 
         L_old = self.optimal_par["C"]
         L_new, L21, L22 = self._extend_cholesky(X_new, X_new_norma, is_acting_new)
@@ -394,26 +436,8 @@ class KRG(KrgBased):
         Y_train_appended = np.vstack((self.training_points[None][0][1], Y_new))
         self.training_points[None][0][1] = Y_train_appended
 
-        if is_acting is not None:
-            self.is_acting_points[None] = np.vstack((is_acting, is_acting_new))
-            self.is_acting_train = self.is_acting_points[None]
-
-        if not self.is_continuous:
-            # Update ij for the new training points
-            # To do this safely and efficiently without recomputing all pairs:
-            # Actually, `self.ij` should be updated to include pairs with new points
-            # But `cross_distances` computes both `D` and `ij` easily.
-            # To keep things perfectly aligned, let's just use `cross_distances(self.X_train)`.
-            _, self.ij = cross_distances(self.X_train)
-
-            # Recompute global Lij and n_levels
-            self.Lij, self.n_levels = cross_levels(
-                X=self.X_train, ij=self.ij, design_space=self.design_space
-            )
-            if hasattr(self, "X2_norma"):
-                X_new_unfolded, _, _ = self.design_space.unfold_x(X_new)
-                X_new_unfolded_norma = (X_new_unfolded - self.X2_offset) / self.X2_scale
-                self.X2_norma = np.vstack((self.X2_norma, X_new_unfolded_norma))
+        self._sync_is_acting(is_acting_new)
+        self._recompute_categorical_metadata(X_new)
 
         self.X_norma = np.vstack((self.X_norma, X_new_norma))
         self.y_norma = np.vstack((self.y_norma, Y_new_norma))
@@ -434,17 +458,4 @@ class KRG(KrgBased):
         Ft = np.vstack((Ft_old, Ft_new))
         Yt = np.vstack((Yt_old, Yt_new))
 
-        # Same GLS estimates as in the likelihood evaluation
-        Q, G = qr(Ft, mode="economic")
-        beta = solve_triangular(G, Q.T @ Yt, check_finite=False)
-        rho = Yt - Ft @ beta
-        p, q = self._get_pq()
-        sigma2 = (rho**2.0).sum(axis=0) / (self.nt - p - q)
-
-        self.optimal_par["sigma2"] = sigma2 * self.y_std**2.0
-        self.optimal_par["beta"] = beta
-        self.optimal_par["gamma"] = solve_triangular(L_new.T, rho, check_finite=False)
-        self.optimal_par["C"] = L_new
-        self.optimal_par["Ft"] = Ft
-        self.optimal_par["G"] = G
-        self.optimal_par["Q"] = Q
+        self._update_gls_parameters(Ft, Yt, L_new)
