@@ -97,6 +97,16 @@ def reference_model(base_model, X_all, Y_all):
 
 
 class TestModelBlockUpdate(unittest.TestCase):
+    def _assert_mixed_matches(self, sm, updated, X_new, Y_new, is_hierarchical=False):
+        original_x_test = self.x_test
+        if is_hierarchical:
+            self.x_test = np.hstack((np.zeros((50, 1)), np.linspace(0, 25, 50).reshape(-1, 1)))
+            self.assert_matches_reference(sm, updated, X_new, Y_new, par_rtol=1e-2, par_atol=1e-2, var_rtol=1e-2, var_atol=1e-2, pred_rtol=1e-2, pred_atol=1e-2)
+        else:
+            self.x_test = np.hstack((np.linspace(0, 25, 50).reshape(-1, 1), np.zeros((50, 1))))
+            self.assert_matches_reference(sm, updated, X_new, Y_new)
+        self.x_test = original_x_test
+
     def setUp(self):
         self.xt = np.array([[3.5], [8.0], [12.0], [17.0]])
         self.yt = xsinx(self.xt)
@@ -251,19 +261,13 @@ class TestModelBlockUpdate(unittest.TestCase):
         updated_single = deepcopy(sm)
         updated_single.update_model(X_new_single, Y_new_single)
 
-        # Temporarily override self.x_test
-        original_x_test = self.x_test
-        self.x_test = np.hstack((np.linspace(0, 25, 50).reshape(-1, 1), np.zeros((50, 1))))
-
-        self.assert_matches_reference(sm, updated_single, X_new_single, Y_new_single)
+        self._assert_mixed_matches(sm, updated_single, X_new_single, Y_new_single)
 
         X_new_multi = np.array([[16.0, 1], [23.0, 0]])
         Y_new_multi = xsinx(X_new_multi[:, :1])
         updated_multi = deepcopy(sm)
         updated_multi.update_model(X_new_multi, Y_new_multi)
-        self.assert_matches_reference(sm, updated_multi, X_new_multi, Y_new_multi)
-
-        self.x_test = original_x_test
+        self._assert_mixed_matches(sm, updated_multi, X_new_multi, Y_new_multi)
 
     def test_hierarchical_variables_update(self):
         from smt.design_space import CategoricalVariable, FloatVariable, DesignSpace
@@ -295,12 +299,7 @@ class TestModelBlockUpdate(unittest.TestCase):
         updated = deepcopy(sm)
         updated.update_model(X_new, Y_new)
 
-        original_x_test = self.x_test
-        self.x_test = np.hstack((np.zeros((50, 1)), np.linspace(0, 25, 50).reshape(-1, 1)))
-
-        self.assert_matches_reference(sm, updated, X_new, Y_new, par_rtol=1e-2, par_atol=1e-2, var_rtol=1e-2, var_atol=1e-2, pred_rtol=1e-2, pred_atol=1e-2)
-
-        self.x_test = original_x_test
+        self._assert_mixed_matches(sm, updated, X_new, Y_new, is_hierarchical=True)
 
 if __name__ == "__main__":
     unittest.main()
