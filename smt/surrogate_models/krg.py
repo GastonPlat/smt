@@ -181,12 +181,12 @@ class KRG(KrgBased):
             )
 
 
-    def _apply_conditional_acting_bounds(self, D: np.ndarray, D_num: np.ndarray, X1: np.ndarray, is_acting1: np.ndarray, X2: np.ndarray, is_acting2: np.ndarray, ij: np.ndarray) -> np.ndarray:
+    def _correct_categorical_acting_distances(self, D: np.ndarray, is_acting1: np.ndarray, is_acting2: np.ndarray, ij: np.ndarray, mixint_type) -> np.ndarray:
         listcatdecreed = self.design_space.is_conditionally_acting[self.cat_features]
         if np.any(listcatdecreed):
             D = self._correct_distances_cat_decreed(
                 D, is_acting1, listcatdecreed, ij,
-                is_acting_y=is_acting2, mixint_type=MixIntKernelType.GOWER
+                is_acting_y=is_acting2, mixint_type=mixint_type
             )
         return D
 
@@ -201,7 +201,7 @@ class KRG(KrgBased):
             "n_comp" not in self.options._dict.keys()
             and "cat_kernel_comp" not in self.options._dict.keys()
         ):
-            D = self._apply_conditional_acting_bounds(D, D_num, X1, is_acting1, X2, is_acting2, ij)
+            D = self._correct_categorical_acting_distances(D, is_acting1, is_acting2, ij, MixIntKernelType.GOWER)
         if np.any(self.design_space.is_conditionally_acting):
             D[:, np.logical_not(unfolded_cat)] = (
                 D_num / self.X2_scale[np.logical_not(unfolded_cat)]
@@ -224,7 +224,7 @@ class KRG(KrgBased):
             y=np.copy(X2), y_is_acting=is_acting2,
         )
 
-        D = self._apply_conditional_acting_bounds(D, D_num, X1, is_acting1, X2, is_acting2, ij)
+        D = self._correct_categorical_acting_distances(D, is_acting1, is_acting2, ij, MixIntKernelType.GOWER)
 
         kernel_handlers = {
             MixIntKernelType.CONT_RELAX: self._apply_continuous_relaxation,
