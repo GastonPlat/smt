@@ -3,6 +3,12 @@ from copy import deepcopy
 
 import numpy as np
 
+import smt.surrogate_models.krg_based.distances as dist
+from smt.surrogate_models.krg_based.mixed_int_corr import (
+    compute_X_cont,
+    gower_componentwise_distances,
+)
+
 from smt.design_space import (
     CategoricalVariable,
     DesignSpace,
@@ -17,7 +23,6 @@ def xsinx(x: np.ndarray) -> np.ndarray:
 
 
 def _setup_mixed_reference(ref, base_model, X_all, Y_all):
-    from smt.surrogate_models.krg_based.mixed_int_corr import compute_X_cont
     is_acting = ref.is_acting_points.get(None)
     if is_acting is not None:
         _, is_acting = ref.design_space.correct_get_acting(X_all)
@@ -43,8 +48,6 @@ def _restore_categorical_scaling(ref, base_model, X_all, is_acting):
     X2, _, unfolded_cat = ref.design_space.unfold_x(X_all)
     X2_norma = (X2 - ref.X2_offset) / ref.X2_scale
 
-    import smt.surrogate_models.krg_based.distances as dist
-    from smt.surrogate_models.krg_based.mixed_int_corr import gower_componentwise_distances
 
     D_unfolded, _ = dist.cross_distances(X2_norma)
     D_unfolded = np.abs(D_unfolded)
@@ -200,7 +203,7 @@ class TestModelBlockUpdate(unittest.TestCase):
         sm.set_training_values(self.xt, np.hstack((self.yt, np.cos(self.xt))))
         sm.train()
 
-        X_new = np.array([16.0, 23.0])  # 1-D input is accepted
+        X_new = np.array([16.0, 23.0])
         Y_new = np.hstack((xsinx(X_new[:, None]), np.cos(X_new[:, None])))
         updated = deepcopy(sm)
         updated.update_model(X_new, Y_new)
@@ -274,14 +277,13 @@ class TestModelBlockUpdate(unittest.TestCase):
 
         ds = DesignSpace(
             [
-                CategoricalVariable(["-1.2277412969136694", "7.914865972987054"]),  # x0
-                FloatVariable(0, 25),             # x1
+                CategoricalVariable(["-1.2277412969136694", "7.914865972987054"]),
+                FloatVariable(0, 25),
             ]
         )
         ds.declare_decreed_var(decreed_var=1, meta_var=0, meta_value="-1.2277412969136694")
 
         xt = np.array([[0, 3.5], [1, 8.0], [0, 12.0], [1, 17.0]])
-        # Just generating some outputs
         yt = np.zeros((4, 1))
         for i in range(4):
             if xt[i, 0] == 0:

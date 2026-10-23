@@ -456,3 +456,5 @@ class KRG(KrgBased):
         Yt = np.vstack((Yt_old, Yt_new))
 
         self._update_predictive_parameters(Ft, Yt, L_new)
+
+# trigger update
